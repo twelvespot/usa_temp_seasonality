@@ -1,0 +1,112 @@
+---
+title: "Gather Zip Codes and Lat/Long Centroid"
+format: html
+---
+
+```{r}
+library(zipcodeR)
+library(tidyverse)
+library(USA.state.boundaries)
+library(janitor)
+library(writexl)
+library(readxl)
+```
+
+Search some zip codes by state
+```{r}
+ut <- search_state("UT")
+geocode_zip("84001")
+```
+
+Going to want to trim down the tibble from all the columns to just a few, so will make a new function
+We're likely going to have zip codes without lat/longs, so one thing we could to is aggregate by county instead of zip, and hopfully if we do that, we'll have full USA coverage.  There's about 1000 less counties in America than zip codes, but that's still good enough when plotting the whole country.
+
+```{r}
+get_lat_longs <- function(state) {
+    state_data <- search_state(state) |> 
+        select(zipcode, major_city, county, state, lat, lng)
+
+    return(state_data)
+}
+
+get_lat_longs("WY")
+```
+
+WY is a square, so let's pick another state to plot lat/longs for
+```{r}
+wy_data <- get_lat_longs("WY")
+ut_data <- get_lat_longs("UT")
+fl_data <- get_lat_longs("FL")
+
+fl_data |> ggplot() +
+    geom_point(aes(x = lng, y = lat))
+```
+
+Pull in all state names here, but will need to drop some like Alasta and Hawaii as I just want the Continental USA for now
+```{r}
+state_tbl <- state_boundaries_wgs84 |> 
+    as_tibble() |> 
+    clean_names()
+
+state_tbl |> 
+    distinct(name, state_abbr) |> View()
+
+cont_usa <- state_tbl |> 
+    filter(!name %in% c("Alaska", "Hawaii", "Puerto Rico", "U.S. Virgin Islands")) |> 
+    distinct(state_abbr) |> 
+    pull()
+```
+
+Now we need to map over the states, get the lat/long centroids
+```{r}
+usa_lls <- map(cont_usa, ~ get_lat_longs(.x)) |> list_rbind()
+
+usa_lls |> ggplot() +
+    geom_point(aes(x = lng, y = lat))
+
+# Something off about the Virginia and some other counties, they have different spellings and capitalization
+usa_lls |> filter(state == "VA") |> View()
+```
+
+That looks good, but we have a ton of points, far too much coverage for USA, also thought that there were 4k zip codes total, but we have like 41k rows of data.  Will check on that but also going to average and aggregate by county anyway.
+```{r}
+county_lls <- usa_lls |> 
+    mutate(county = str_to_lower(county)) |> 
+    group_by(state, county) |> 
+    summarise(lat = mean(lat, na.rm = TRUE),
+              long = mean(lng, na.rm = TRUE), 
+              .groups = "drop"
+    ) |> 
+    # There are some blank counties for some reason
+    filter(county != "")
+# Now how does a plot look by county?  Interesting, Maine drops down to very few points, and the west drops a ton of points, but right along a vertical line
+county_lls |> 
+    ggplot() +
+    geom_point(aes(x = long, y = lat))
+```
+
+I may need to get FIPS codes per county, but we'll see.  Will write the county data to Excel for now and get the elevation with python
+```{r}
+county_lls |> write_xlsx("./data/county_lat_longs.xlsx")
+```
+
+We're going to need the FIPS code for each county, because that's how the geo_json file is constructed, I think it's got a column of polygon coordinates and the next column is FIPS.  
+Only issue is I found the county names and FIPS codes in a very non user-friendly format
+
+Crap, the data is reading in, even with tsv, as a single text string.  We'll need to separate out the numbers from the county names. Then we'll need to attach the state name to the county, but the state is the leading element in the column.  Easy peazy, will just join the state names to the tibble, then there is a tidyr function that will fill the NAs until the next populated value begins
+```{r}
+fips_raw <- read_tsv("./data/county_fips.txt", skip = 3, col_names = "fips_counties")
+fips_counties <- fips_raw |> 
+    mutate(fips_code = parse_number(fips_counties)) |> 
+    # Might need to bring the leading 0s back in and make the fips code a character, I think
+    mutate(name = str_remove_all(fips_counties, pattern = "[0-9]")) |> 
+    mutate(name = str_squish(name)) |> 
+    left_join(state_tbl |> select(name, state_abbr), by = "name") |> 
+    fill(state_abbr, .direction = "down") |> 
+    select(!fips_counties)
+
+fips_counties
+```
+
+
+

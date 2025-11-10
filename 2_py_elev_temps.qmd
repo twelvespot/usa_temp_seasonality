@@ -1,0 +1,161 @@
+---
+title: "2 - Get Elevation, 5yr Temp Data then Average by County"
+format: html
+---
+
+second script here to use python and open-elevation API to get the elevation for each lat long in the county data.  Elevation, in meters, is a required paramter for the meteostat library to pull the daily temperatures
+```{python}
+import requests
+import pandas as pd
+import polars as pl
+import matplotlib as plt
+from datetime import datetime
+import time
+import matplotlib.pyplot as plt
+from meteostat import Point, Daily
+import pyarrow
+```
+
+Load the county data
+
+```{python}
+county_data = pl.read_excel("./data/county_lat_longs.xlsx")
+
+county_data
+```
+
+Get the elevation data
+
+```{python}
+# Function to get elevation from Open-Elevation API
+def get_elev_test(lat, lon):
+    query = f'https://api.open-elevation.com/api/v1/lookup?locations={lat},{lon}'
+    try:
+        r = requests.get(query).json()
+        #elevation = pd.json_normalize(r, 'results')['elevation'].values[0]
+        return r #elevation
+    except Exception as e:
+        print(f"Error getting elevation for {lat},{lon}: {e}")
+        return None
+```
+
+```{python}
+get_elev_test(32.553333, -86.626667)
+```
+```{python}
+# Function to get elevation from Open-Elevation API
+def get_elevation(lat, long):
+    query = f'https://api.open-elevation.com/api/v1/lookup?locations={lat},{long}'
+    try:
+        elev_response = requests.get(query).json()
+        elevation = elev_response['results'][0]['elevation']
+        return elevation
+    except Exception as e:
+        print(f"Error getting elevation for {lat},{long}: {e}")
+        return None
+    time.sleep(.2)
+```
+
+The get_elevation() function returns the elevation as a pd thing, but it's actually a numpy single number, so I think we can use that as a new column for the polars dataframe.  I would much prefer to parse the json response with polars itself instead of pandas, but here we are.
+```{python}
+get_elevation(32.553333, -86.626667)
+```
+
+```{python}
+counties_elev = (
+    county_data.with_columns(
+        pl.struct(["lat", "long"])
+        .map_elements(
+            lambda row: get_elevation(row["lat"], row["long"]), 
+            return_dtype=pl.Float64)
+        .alias("elev_meters")
+        )
+    .filter(pl.col("elev_meters").is_not_null())
+    .with_columns(
+    pl.col("lat").round(4).alias("lat")
+    )
+    .with_columns(
+    pl.col("long").round(4).alias("long")
+    )
+)
+
+counties_elev
+```
+
+Some counties didn't have any lat/longs from the R file, will need to check that out, turns out there were 64
+Some were all over the country, but there actually is a large chunk that was just VA, so will need to look into that.
+I looked into it and there are capitalization duplicates for all the ones I saw where one was populated with elevations and the second wasn't.  So I just added the filter above to check that elevation is populated
+
+Now do another API call to get the temperature data
+Example chunk first
+```{python}
+# Set time period
+start = datetime(2020, 1, 1)
+end = datetime(2024, 12, 31)
+
+# Create Example Point for Vancouver, BC
+vancouver = Point(49.2497, -123.1193, 70)
+
+# Get daily data for 2020-2024
+van_data = Daily(vancouver, start, end)
+van_data = van_data.fetch()
+van_data
+```
+
+A huge code chunk here from Gemini to pull the temperature data from meteostat.  Slightly odd thing that we're doing here is iterating through the rows of the county dataframe, but only storing the temperature data in a new dataframe, NOT the source polars dataframe.
+
+```{python}
+def fetch_weather_data(state, county, lat, long, alt, start_date, end_date):
+    """
+    Fetches daily average temperature for a given lat/long and date range
+    using the meteostat library.
+    """
+    try:
+        location = Point(lat, long, alt)
+        data = Daily(location, start_date, end_date)
+        # Fetch data and convert to pandas DataFrame
+        df_pd = data.fetch() 
+        df_pd = df_pd.reset_index()
+        if df_pd is not None and not df_pd.empty:
+            # Add lat/lon columns to the weather data for joining back
+            df_pd['latitude'] = lat
+            df_pd['longitude'] = long
+            df_pd['state'] = state
+            df_pd['county'] = county
+            # Keep only the relevant columns (e.g., date, tavg, lat, lon)
+            # 'tavg' is average temperature. Other options are 'tmin', 'tmax', 'prcp', etc.
+            return df_pd[['state', 'county', 'latitude', 'longitude', 'time', 'tmax', 'tmin']]
+    except Exception as e:
+        print(f"Error fetching data for {county}, {state}, {lat}, {long}: {e}")
+        return pd.DataFrame() # Return empty if fetching fails
+```
+```{python}
+# 1. Create a sample Polars DataFrame (replace with your actual data)
+# Replaced
+
+# 2. Define the time period (full year)
+start_date = datetime(2020, 1, 1)
+end_date = datetime(2024, 12, 31)
+
+# 3. Iterate through locations and fetch data
+all_temp_data = []
+for row in counties_elev.iter_rows(named=True):
+    state = row['state']
+    county = row['county']
+    lat = row['lat']
+    long = row['long']
+    alt = row['elev_meters']
+    weather_df = fetch_weather_data(state, county, lat, long, alt, start_date, end_date)
+    if weather_df is not None and not weather_df.empty:
+        all_temp_data.append(pl.from_pandas(weather_df)) # Convert to Polars
+    time.sleep(.2)
+
+# 4. Combine all results into a single Polars DataFrame
+if all_temp_data:
+    counties_annual = pl.concat(all_temp_data)
+    print(final_df.head())
+    print(final_df.describe())
+else:
+    print("No weather data was retrieved.")
+```
+

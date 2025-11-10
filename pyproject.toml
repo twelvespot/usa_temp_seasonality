@@ -2,4 +2,13 @@
 name = "usa_temp_seasonality"
 version = "0.1.0"
 requires-python = ">= 3.13.9"
-dependencies = []
+dependencies = [
+    "fastexcel>=0.16.0",
+    "matplotlib>=3.10.7",
+    "meteostat>=1.7.6",
+    "pandas>=2.3.3",
+    "plotly>=6.4.0",
+    "polars>=1.35.2",
+    "pyarrow>=22.0.0",
+    "requests>=2.32.5",
+]
