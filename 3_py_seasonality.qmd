@@ -1,0 +1,134 @@
+---
+title: "Untitled"
+format: html
+---
+Here we will do the county calculations and averaging down to the day of the year
+
+```{python}
+import polars as pl
+import datetime as dt
+import numpy as np
+from scipy.stats import entropy
+```
+```{python}
+counties_annual = pl.read_parquet("./data/annual_temps_county.parquet")
+counties_annual
+```
+
+Now add new column for month and day
+```{python}
+counties_dates = counties_annual.with_columns(
+    [
+        pl.col("time").dt.month().alias("month"),
+        pl.col("time").dt.day().alias("day_of_month")
+    ]
+)
+counties_dates
+```
+
+Now group by state, county, month and day, and average max and min.
+This will give us our average high for these days over the last 5 years
+And convert from Celcius to Fahrenheit at the same time
+
+```{python}
+counties_averaged = (
+    counties_dates.group_by(["state", "county", "month", "day_of_month"]).agg([
+        (pl.col("tmax").mean() * 1.8 + 32).alias("ave_max"),
+        (pl.col("tmin").mean() * 1.8 + 32).alias("ave_min")
+        ])
+        .sort(["state", "county", "month", "day_of_month"])
+)
+
+counties_averaged
+```
+
+Feels like we're short on days for some counties, need to count them up
+Most ought to have the full 366, will need to decide a cutoff of who to keep out
+Because a seasonality calculator won't work well if we have a county that has only temps shown for July-Sep, they'll get a low seasonality score because the don't have any temps < 40deg.
+Turns out we have a full 366 days for the counties we have, the issue must be that we are missing some counties all together now. The temp_counts table has only 2397 rows, and there are around 3k counties in USA
+```{python}
+temp_counts = (
+    counties_averaged.with_columns(
+        pl.when(pl.col("ave_max") > 80)
+        .then(pl.lit("Hot > 80"))
+        .when(pl.col("ave_max") > 60)
+        .then(pl.lit("Warm 60-79"))
+        .when(pl.col("ave_max") > 40)
+        .then(pl.lit("Cool 40-59"))
+        .otherwise(pl.lit("Cold < 40"))
+        .alias("temp_group")
+    ).group_by(["state", "county", "temp_group"]).agg(
+        pl.count().alias("count")
+    ).pivot("temp_group", index=["state", "county"], values="count")
+    .with_columns(
+        pl.col("Cool 40-59").fill_null(0),
+        pl.col("Cold < 40").fill_null(0),
+        pl.col("Warm 60-79").fill_null(0),
+        pl.col("Hot > 80").fill_null(0),
+    ).select("state", "county", "Cold < 40", "Cool 40-59", "Warm 60-79", "Hot > 80")
+)
+temp_counts
+```
+
+Now we'll begin calculating a seasonality score since all the counties we do have all days througout the year
+
+```{python}
+def calc_seasonality(daily_temps):
+    # Define temp categories (Comment one out and go back and forth)
+    # Bins group 1
+    #temp_bins = [-np.inf, 40, 60, 75, 85, np.inf]
+    #category_labels = ["cold", "cool", "mild", "warm", "hot"]
+
+    # Bins group 2
+    temp_bins = [-np.inf, 40, 60, 80, np.inf]
+    category_labels = ["cold", "mild", "warm", "hot"]
+
+    # Count days in each category
+    hist, _ = np.histogram(daily_temps, bins=temp_bins)
+
+    # Calculate proportions
+    proportions = hist / sum(hist)
+
+    # Remove empty categories
+    proportions_safe = np.where(proportions > 0, proportions, 1e-10)
+
+    # Calculate entropy manually
+    entropy_value = -np.sum(proportions * np.log(proportions_safe))
+
+    # IMPORTANT: Normalize by log of TOTAL possible categories (5), not just populated ones
+    max_entropy = np.log(4)
+    score = entropy_value / max_entropy
+
+    return score
+```
+
+Now run the function through the grouped dataframe
+```{python}
+temps_grouped = counties_averaged.group_by(["state", "county"]).agg([
+    pl.col("ave_max")
+])
+
+county_seasonality = temps_grouped.with_columns([
+    pl.col("ave_max").map_elements(
+        lambda temps: calc_seasonality(np.array(temps)),
+        return_dtype=pl.Float64
+    ).alias("seasonality_score")
+]).drop("ave_max")
+
+county_seasonality
+```
+
+That took quite a bit of back and forth with Claude to get the entropy calculations working, and it was on my phone, because I couldn't access the same login from my computer as my phone logged in with Apple and Hide My Email.  Ugh.
+Now we can join the temp count data to the seasonality data, then that will be the final dataframe that plotly will access to plot the colors.  The other dataframe that plotly will need is a geo_json of county shapes along with FIPS codes
+Will need to replace the nulls with 0 and then reorder the columns
+```{python}
+county_seasons_counts = county_seasonality.join(temp_counts, on=["state", "county"], how="left")
+
+county_seasons_counts
+```
+
+Now write the county seasonality and temp counts to parquet for the final qmd
+
+```{python}
+county_seasons_counts.write_parquet("./data/county_seasonality_counts.parquet")
+```

@@ -6,10 +6,12 @@ format: html
 ```{r}
 library(zipcodeR)
 library(tidyverse)
+library(glue)
 library(USA.state.boundaries)
 library(janitor)
 library(writexl)
 library(readxl)
+library(arrow)
 ```
 
 Search some zip codes by state
@@ -103,10 +105,48 @@ fips_counties <- fips_raw |>
     mutate(name = str_squish(name)) |> 
     left_join(state_tbl |> select(name, state_abbr), by = "name") |> 
     fill(state_abbr, .direction = "down") |> 
-    select(!fips_counties)
+    select(!fips_counties) |> 
+    mutate(fips_code = as.character(fips_code)) |> 
+    mutate(fips_code = if_else(str_length(fips_code) == 4, glue("0{fips_code}"), fips_code)) |> 
+    select(fips_code, state = state_abbr, county = name) |> 
+    mutate(fips_code = as.character(fips_code))
 
 fips_counties
 ```
 
+Save the fips codes to parquet so that the fips code stays character, reading in via excel will drop that leading 0
+
+```{r}
+fips_counties |> write_parquet("./data/fips_counties.parquet")
+```
+
+Even tho this is qmd #1, I want to take the fips codes we have seasonality for and plot the lat/longs.  I thought there were 3k counties in America, but we only have a full 366 averaged days for 2397 counties.  Need to see if counties are missing randomly, or if there are whole states missing
+
+```{r}
+county_lls <- read_xlsx("./data/county_lat_longs.xlsx")
+r_counties_all <- read_parquet("./data/annual_temps_county.parquet")
+
+county_lls
+r_counties_all
+```
 
 
+```{r}
+counties_w_temps <- r_counties_all |> filter(!is.na(tmax)) |> 
+    distinct(state, county, latitude, longitude)
+
+counties_w_temps |> distinct(state)
+
+counties_w_temps |> ggplot() +
+    geom_point(aes(x = longitude, y = latitude))
+
+county_lls |> 
+    left_join(counties_w_temps |> 
+        distinct(state, county) |> 
+        mutate(data = "yes"), 
+    by = c("state", "county")) |> 
+    replace_na(list(data = "no")) |> 
+    ggplot() +
+    geom_point(aes(x = long, y = lat, color = data))
+
+```

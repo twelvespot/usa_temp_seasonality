@@ -19,7 +19,16 @@ import pyarrow
 Load the county data
 
 ```{python}
-county_data = pl.read_excel("./data/county_lat_longs.xlsx")
+county_data = (
+    pl.read_excel("./data/county_lat_longs.xlsx")
+    .filter(pl.col("lat").is_not_null())
+    .with_columns(
+    pl.col("lat").round(4).alias("lat")
+    )
+    .with_columns(
+    pl.col("long").round(4).alias("long")
+    )
+)
 
 county_data
 ```
@@ -70,13 +79,6 @@ counties_elev = (
             return_dtype=pl.Float64)
         .alias("elev_meters")
         )
-    .filter(pl.col("elev_meters").is_not_null())
-    .with_columns(
-    pl.col("lat").round(4).alias("lat")
-    )
-    .with_columns(
-    pl.col("long").round(4).alias("long")
-    )
 )
 
 counties_elev
@@ -149,13 +151,23 @@ for row in counties_elev.iter_rows(named=True):
     if weather_df is not None and not weather_df.empty:
         all_temp_data.append(pl.from_pandas(weather_df)) # Convert to Polars
     time.sleep(.2)
+```
 
+
+```{python}
 # 4. Combine all results into a single Polars DataFrame
 if all_temp_data:
     counties_annual = pl.concat(all_temp_data)
-    print(final_df.head())
-    print(final_df.describe())
+    print(counties_annual.head())
+    print(counties_annual.describe())
 else:
     print("No weather data was retrieved.")
 ```
 
+Now since that took an hour or to to run, will save to parquet
+
+```{python}
+counties_annual.write_parquet("./data/annual_temps_county.parquet")
+```
+
+Will continue in 3_py_temp_calcs.qmd
